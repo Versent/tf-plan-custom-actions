@@ -1,0 +1,139 @@
+name: Terraform Plan Custom Action
+
+description: Performs a Terraform plan and returns the output
+
+inputs:
+  tfDir:
+    description: The directory where the Terraform templates are located
+    required: false
+    default: ""
+  tfArgs:
+    description: Extra arguments to pass to terraform
+    required: false
+    default: ""
+  tfWorkspace:
+    description: The Terraform workspace to select
+    required: false
+    default: "default"
+  gitUser:
+    description: The Git user used to clone repositories
+    required: true
+  gitToken:
+    description: The Git user token used to clone repositories
+    required: true
+  commentPrNumber:
+    description: Pull Request ID to add the TF Plan comment
+    required: false
+  commentTitle:
+    description: Main title for TF Plan comment on Pull Request
+    required: false
+    default: Terraform Plan Results
+  commentSubTitle:
+    description: Sub title for TF Plan comment on Pull Request
+    required: false
+    default: Terraform Plan
+
+outputs:
+  tfplan:
+    description: The Terraform plan output
+    value: ${{ steps.plan.outputs.plan_output }}
+  message:
+    description: Friendly message that shows if there are changes to review
+    value: ${{ steps.plan.outputs.plan_msg }}
+  result:
+    description: The return code of the plan. 0 = no changes, 1 = error, 2 = changes
+    value: ${{ steps.plan.outputs.plan_result }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Terraform formatting
+      shell: bash
+      working-directory: ${{inputs.tfDir}}
+      run: |
+        terraform fmt -check -recursive -diff
+
+    - name: Setup Git
+      shell: bash
+      env:
+        GIT_USER: ${{inputs.gitUser}}
+        GIT_TOKEN: ${{inputs.gitToken}}     
+      run: |
+        git config --global credential.helper store
+        echo "https://$GIT_USER:GIT_TOKEN@github.com" >> ~/.git-credentials
+    
+    - name: Terraform Init
+      shell: bash
+      working-directory: ${{inputs.tfDir}}
+      run: | 
+       terraform init -input=false
+       terraform workspace select ${{ inputs.tfWorkspace }} || terraform workspace new ${{ inputs.tfWorkspace }}
+
+    - name: Terraform Plan
+      shell: bash
+      id: plan
+      working-directory: ${{ inputs.tfDir }}
+      run: |
+        PLAN_OUTPUT="$(terraform plan -no-color -detailed-exitcode -out=tfplan ${{ inputs.tfArgs }})" || PLAN_RESULT=$?
+        echo "plan_result=$PLAN_RESULT" >> $GITHUB_OUTPUT
+
+        if [ "${#PLAN_OUTPUT}" -gt 131071 ]; then
+          PLAN_OUTPUT="The plan output was too big to comment. Please view the actions output for the plan results.";
+        fi
+        
+        # echo "plan_output=$PLAN_OUTPUT" >> $GITHUB_OUTPUT
+
+        EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+        echo "plan_output<<$EOF" >> $GITHUB_OUTPUT
+        echo "$PLAN_OUTPUT" >> $GITHUB_OUTPUT
+        echo "$EOF" >> $GITHUB_OUTPUT
+        
+
+        case $PLAN_RESULT in
+          1)
+            exit 1
+            ;;
+          2)
+            MSG="Changes to review! :warning:"
+            ;;
+          *)
+            MSG="No changes :white_check_mark:"
+            ;;
+        esac
+        echo "plan_msg=$MSG" >> $GITHUB_OUTPUT
+
+        terraform show -json tfplan > tfplan.json
+        terraform show tfplan
+
+    - name: Add TF Plan comment to PR
+      if: ${{ inputs.commentPrNumber != '' && steps.plan.outcome == 'success'}}
+      shell: bash
+      working-directory: ${{ inputs.tfDir }}
+      run: |
+        echo "## ${{ inputs.commentTitle }} &#128195;" > comment.txt
+        echo "### ${{ inputs.commentSubTitle }}" >> comment.txt
+        echo "${{ steps.plan.outputs.plan_msg }}" >> comment.txt
+        echo "<details><summary>Show Plan</summary>" >> comment.txt
+        echo "" >> comment.txt
+        echo "\`\`\`terraform" >> comment.txt
+        echo "${{ steps.plan.outputs.plan_output }}" >> comment.txt
+        echo "\`\`\`" >> comment.txt
+        echo "</details>" >> comment.txt
+
+        PR_PAYLOAD="$(echo '{}' | jq --arg body "$(cat comment.txt)" '.body = $body')"
+
+        curl -sS \
+          -X POST \
+          -H "Accept: application/vnd.github+json" \
+          -H "Authorization: Bearer ${{ github.token }}"\
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          -L "https://api.github.com/repos/${{ github.repository }}/issues/${{ inputs.commentPrNumber }}/comments" \
+          --data "$PR_PAYLOAD"
+          
+    - name: Cleanup
+      shell: bash
+      run: rm ~/.git-credentials
+
+branding:
+  icon: 'award'
+  color: 'green'

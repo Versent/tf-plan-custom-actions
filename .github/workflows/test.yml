@@ -1,0 +1,16 @@
+name: Test Composite Actions
+
+on:
+    push: 
+        branches:
+            - main
+
+jobs:
+    testing-action:
+        name: Testing Custom Action
+        runs-on: ubuntu-latest
+        permissions:
+            issues: write
+            pull-requests: write
+        steps:
+            - run: echo this workflow/job/step is executed for event type - ${{github.event_name}}
